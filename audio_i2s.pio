@@ -1,0 +1,51 @@
+.program audio_i2s
+.side_set 2
+
+; Máquina de estados I2S (16-bit por canal)
+; side_set pin 0 = BCLK
+; side_set pin 1 = LRCK (Word Select)
+
+                ; /--- LRCK
+                ; |/-- BCLK
+public entry:
+    set x, 14         side 0b01
+left_ch:
+    out pins, 1       side 0b00
+    jmp x-- left_ch   side 0b01
+    out pins, 1       side 0b10 ; Saca el último bit de L y cambia LRCK a R
+    set x, 14         side 0b11
+right_ch:
+    out pins, 1       side 0b10
+    jmp x-- right_ch  side 0b11
+    out pins, 1       side 0b00 ; Saca el último bit de R y cambia LRCK a L
+    jmp entry         side 0b01
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin_base, uint sample_rate) {
+    pio_sm_config sm_config = audio_i2s_program_get_default_config(offset);
+    
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+    
+    // Shift out MSB first, autopull activado, umbral de 32 bits (L + R)
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, clock_pin_base);     // BCLK
+    pio_gpio_init(pio, clock_pin_base + 1); // LRCK
+
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, true);
+
+    // Calculamos el divisor de reloj: 64 ciclos PIO por muestra (16 bits * 2 canales * 2 flancos)
+    float sys_clk = (float)clock_get_hz(clk_sys);
+    float div = sys_clk / ((float)sample_rate * 64.0f);
+    sm_config_set_clkdiv(&sm_config, div);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
