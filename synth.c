@@ -110,21 +110,20 @@ uint16_t ADSR_advance(ADSR_engine_t* adsr, ADSR_config_t* cfg, uint32_t frame) {
 
 // Voces
 
-#define OSCxVOICE 2
-int32_t osc_detune[] = {-100000, 100000};
-
-typedef enum{saw_tri, square} osc_shape_t;
+typedef enum{saw, tri, square, pulse} osc_shape_t;
 volatile osc_shape_t shape;     // sierra-triangular / cuadrada
-volatile uint8_t shaping;       // PWM o triangulización
+volatile uint8_t shaping;       // hipersaw - metalizer - PW - XOR
 
 typedef struct{
     volatile uint32_t frame; // <-- acá guardo cuándo se encendió el oscilador! 
-    volatile int32_t phase_acc[OSCxVOICE];
+    volatile int32_t phase_acc;
     volatile uint32_t phase_inc;
     volatile uint8_t current_note;
 
     ADSR_engine_t vca_env;
     volatile uint16_t current_amp;
+
+    uint16_t metalic;
 
     // --- Filtro Sallen-Key ---
     ADSR_engine_t vcf_env;
@@ -165,6 +164,9 @@ int32_t LFO_LUT(LFO_t* lfo){
 }
 
 
+
+void plot_curve(int8_t*);
+int8_t wave[128];
 
 // Funciones externas
 
@@ -208,6 +210,8 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
         v->vcf_env.estado = att;
         v->vcf_env.count = 0;
 
+        v->metalic = (uint16_t)shaping << 8;
+
     } else if (command == 0x80 || (command ==0x90 && vel == 0)) {
         // Note OFF
         for(uint8_t i = 0; i < MAX_VOICES; i++){
@@ -218,9 +222,15 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
     }
 
     if(command == 0xB0){
-        if(note == 1){          // 1-Modulation : Filter Cutoff
+        if(note == 1){          // 1-Modulation 
             shaping = vel * 2;
-        } //else if (note == 2){  // 2-Breath : Filter Resonance
+
+            for(uint8_t i = 0; i < 128; i++)
+                wave[i] = ((i/2 - 32) * shaping) >> 8;
+
+            plot_curve(wave);
+
+        } //else if (note == 2){  // 2-Breath 
         //     resonance = vel * 300;
         // }
 
@@ -230,6 +240,40 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
 
 
 
+const int16_t wavefolder[] = {
+    0, 324, 649, 973, 1298, 1622, 1947, 2271, 
+    2595, 2920, 3244, 3569, 3893, 4218, 4542, 4866, 
+    5191, 5515, 5840, 6164, 6489, 6813, 7137, 7462, 
+    7786, 8111, 8435, 8760, 9084, 9408, 9733, 10057, 
+    10382, 10706, 11030, 11355, 11679, 12004, 12328, 12653, 
+    12977, 13301, 13626, 13950, 14275, 14599, 14924, 15248, 
+    15572, 15897, 16221, 16546, 16870, 17195, 17519, 17843, 
+    18168, 18492, 18817, 19141, 19466, 19790, 20114, 20439, 
+    20763, 21088, 21412, 21737, 22061, 22385, 22710, 23034, 
+    23359, 23683, 24008, 24332, 24656, 24981, 25305, 25630, 
+    25954, 26278, 26603, 26927, 27252, 27576, 27901, 28225, 
+    28549, 28874, 29198, 29523, 29847, 30172, 30496, 30820, 
+    31145, 31469, 31794, 32118, 32443, 32767, 32439, 32112, 
+    31784, 31456, 31129, 30801, 30473, 30146, 29818, 29490, 
+    29163, 28835, 28507, 28180, 27852, 27524, 27197, 26869, 
+    26541, 26214, 25886, 25558, 25231, 24903, 24576, 24248, 
+    23920, 23593, 23265, 22937, 22610, 22282, 21954, 21627, 
+    21299, 20971, 20644, 20316, 19988, 19661, 19333, 19005, 
+    18678, 18350, 18022, 17695, 17367, 17039, 16712, 16384, 
+    16712, 17039, 17367, 17695, 18022, 18350, 18678, 19005, 
+    19333, 19661, 19988, 20316, 20644, 20971, 21299, 21627, 
+    21954, 22282, 22610, 22937, 23265, 23593, 23920, 24248, 
+    24576, 24903, 25231, 25558, 25886, 26214, 26541, 26869, 
+    27197, 27524, 27852, 28180, 28507, 28835, 29163, 29490, 
+    29818, 30146, 30473, 30801, 31129, 31456, 31784, 32112, 
+    32439, 32767, 32439, 32112, 31784, 31456, 31129, 30801, 
+    30473, 30146, 29818, 29490, 29163, 28835, 28507, 28180, 
+    27852, 27524, 27197, 26869, 26541, 26214, 25886, 25558, 
+    25231, 24903, 24576, 24248, 23920, 23593, 23265, 22937, 
+    22610, 22282, 21954, 21627, 21299, 20971, 20644, 20316, 
+    19988, 19661, 19333, 19005, 18678, 18350, 18022, 17695, 
+    17367, 17039, 16712, 16384, 16056, 15729, 15401, 15073
+};
 
 
 int16_t SYNTH_get_audio_sample(){
@@ -248,19 +292,26 @@ int16_t SYNTH_get_audio_sample(){
 
 
         // Forma de onda
-        int16_t raw_saw = 0,
-                raw_tri = 0,
-                raw_sqr = 0;
-        for(uint8_t j = 0; j < OSCxVOICE; j++){
-            voices[i].phase_acc[j] += voices[i].phase_inc + osc_detune[j];//lfo_detune.value;
+        v->phase_acc += v->phase_inc;// + lfo_detune.value;
             
-            int32_t p = voices[i].phase_acc[j];
-            raw_saw += (int16_t)(p >> 17); // 16 + 1
-            raw_tri += (int16_t)(((p ^ (p >> 31)) >> 16) - 16381);
+        int32_t p = v->phase_acc;
+        int16_t raw_saw = (int16_t)(p >> 17); // 16 + 1
 
-        }
 
-        int16_t raw_wave = raw_saw + (int16_t)(((int32_t)(raw_tri - raw_saw) * shaping) >> 8);
+        int16_t raw_tri = (int16_t)(((p ^ (p >> 31)) >> 15) - 32768);
+
+        uint16_t gain = 256 + ((v->metalic >> 8) * 6);
+        if(v->metalic > 0)
+            v->metalic--;
+        
+        // triángulo amplificado (excedido del rango de int16_t)
+        int32_t driven_tri = (raw_tri * gain) >> 8; 
+        
+        int32_t sign = driven_tri >> 31;
+        // valor absoluto branchless
+        int32_t abs_driven = (driven_tri ^ sign) - sign;
+
+        int16_t raw_wave = (wavefolder[(uint8_t)(abs_driven >> 9)] ^ sign) - sign; 
 
 
         // VCF

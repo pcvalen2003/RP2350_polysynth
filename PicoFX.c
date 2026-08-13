@@ -8,6 +8,12 @@
 #include "audio_i2s.pio.h" // El header que genera CMake
 // https://github.com/lichen-community-systems/pio-i2s/tree/main/src
 
+#include "hardware/i2c.h"
+#include "hardware/gpio.h"
+#include "ssd1306.h"
+#include "pico/time.h"
+#include "pico/multicore.h"
+
 #include "synth.h"
 
 #define AUDIO_DATA_PIN 28
@@ -65,18 +71,90 @@ void dma_handler() {
     playing_buffer0 = !playing_buffer0;
 }
 
+
+    // Display OLED I2C //
+
+#define I2C_SDA_PIN 4
+#define I2C_SCL_PIN 5
+ssd1306_t display;
+
+void setup_oled_i2c() {
+    // puerto i2c0 a 400 kHz (Fast Mode, ideal para el OLED)
+    i2c_init(i2c0, 400 * 1000);
+
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
+    
+    // inicialización SSD1306
+    ssd1306_init(&display, 128, 64, 0x3c, i2c0);
+    ssd1306_clear(&display);
+
+    ssd1306_draw_square(&display, 10, 10, 108, 44);
+    ssd1306_show(&display);
+}
+
+
+int8_t* w;
+bool need2plot;
+absolute_time_t last_plot_time;
+
+void plot_curve(int8_t* wave){
+    w = wave;
+    need2plot = true;
+}
+
+void do_the_plot(){
+    if (absolute_time_diff_us(last_plot_time, get_absolute_time()) > 50000) {
+        ssd1306_clear(&display);
+
+        for(uint8_t i = 0; i < 128; i++)
+            ssd1306_draw_pixel(&display, i, 32-w[i]);
+
+        ssd1306_show(&display);
+
+        // Actualizamos el tiempo de la última vez que dibujamos
+        last_plot_time = get_absolute_time(); 
+        
+        need2plot = false;
+    }
+}
+
+
+void core1_main() {
+    // Inicializamos el display acá, manejado por el núcleo secundario
+    setup_oled_i2c(); 
+
+    while (1) {
+        if(need2plot)
+            do_the_plot();
+        
+        
+        // Dormimos el Core 1 un ratito para no saturar el bus de memoria de la Pico
+        sleep_ms(15); 
+    }
+}
+
+
+
+
+
 int main() {
     board_init(); 
     tusb_init();
     SYNTH_init();
 
-    // 1. Inicializar PIO I2S
+    //setup_oled_i2c(); <-- lo hace el core 1
+
+    // inicializar PIO I2S
     PIO pio = pio0;
     uint sm = 0;
     uint offset = pio_add_program(pio, &audio_i2s_program);
     audio_i2s_program_init(pio, sm, offset, AUDIO_DATA_PIN, AUDIO_BCLK_PIN, SAMPLE_RATE);
 
-    // 2. Configurar DMA
+    // configurar DMA
     dma_channel = dma_claim_unused_channel(true);
     dma_channel_config dma_config = dma_channel_get_default_config(dma_channel);
     
@@ -94,17 +172,18 @@ int main() {
         false          
     );
 
-    // 3. Activar Interrupciones
+    // activar interrupciones
     dma_channel_set_irq0_enabled(dma_channel, true);
     irq_set_exclusive_handler(DMA_IRQ_0, dma_handler);
     irq_set_enabled(DMA_IRQ_0, true);
 
-    // Rellenar la "bomba" de agua inicial y encender
+    multicore_launch_core1(core1_main); // lanzar el core 1
+
     fill_audio_buffer(buffer0);
     fill_audio_buffer(buffer1);
     dma_channel_start(dma_channel);
 
-    // Loop infinito Bare-Metal
+
     while (1) {
         tud_task();
         process_midi();
@@ -118,6 +197,7 @@ int main() {
             fill_audio_buffer(buffer1);
             fill_buffer1 = false;
         }
+
     }
 
     return 0;

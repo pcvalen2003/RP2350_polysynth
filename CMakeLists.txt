@@ -38,6 +38,7 @@ pico_sdk_init()
 add_executable(PicoFX PicoFX.c
     usb_descriptors.c
     synth.c
+    ssd1306.c
     )
 
 pico_set_program_name(PicoFX "PicoFX")
@@ -59,6 +60,9 @@ target_link_libraries(PicoFX
         hardware_pio
         hardware_dma
         hardware_clocks
+        hardware_i2c       # i2c_init y I2C0
+        hardware_gpio      # Para configurar el Pin Mux (GP4/GP5)
+        pico_multicore
     )
 
 # Add the standard include files to the build
