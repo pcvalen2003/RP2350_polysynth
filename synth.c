@@ -1,8 +1,12 @@
 #include <synth.h>
 #include <analog_modeling.c>
+#include "pico/stdlib.h"
+#include "cmsis_compiler.h"
+#include <math.h>
 
 #include <LUT/LFO.h>
 #include <LUT/ENV.h>
+#include <LUT/waveforms.h>
 
 #ifndef SAMPLE_RATE
     #define SAMPLE_RATE 44100
@@ -17,71 +21,70 @@ typedef struct{
     volatile uint32_t decay;
     volatile uint16_t sustain;
     volatile uint32_t release;
-
-    volatile uint16_t depth;
-    volatile uint16_t bias;
 } ADSR_config_t;
 
 ADSR_config_t vca_envelope = {
-    16, 8, 0xffff, 1, 
-    0xffff, 0
+    0x0fff, 1, 0, 12,   // A D S R
 };
 
-
-ADSR_config_t vcf_envelope = {
-    64, 16, 0xffff/2, 1, 
-    0xffff/2, 0xffff/2
+ADSR_config_t morph_envelope = {
+    64, 16, 0xffff/2, 1,    // A D S R
 };
-
-int32_t resonance   = 28000;    // [0, 1] Q15
 
 
 
 // Motor del ADSR
 
 typedef enum{
-    att, dec, sus, rel, off
+    attack, decay, sustain, release, off
 } ADSR_estate_t;
 
 typedef struct{
-    volatile ADSR_estate_t estado;
-    volatile uint32_t count;
-    volatile uint16_t amp_to_release;
-    volatile uint16_t output;
+    ADSR_estate_t estado;
+    uint32_t count;
+    uint16_t amp_to_release;
+    uint16_t output;
 } ADSR_engine_t;
 
 uint16_t ADSR_advance(ADSR_engine_t* adsr, ADSR_config_t* cfg, uint32_t frame) {
     switch (adsr->estado) {
-    case att:
+    case attack:
         if(adsr->count < 0x1ffff - cfg->attack) {
             adsr->count += cfg->attack;
             adsr->output = ENV_lut_exp[(uint8_t)(adsr->count >> 9)];
         } else {
-            adsr->estado = (cfg->sustain == 0xffff)? sus : dec;
+            adsr->estado = (cfg->sustain == 0xffff)? sustain : decay;
             adsr->count = 0;
             adsr->output = 0xffff;
         }
-        break;
 
-    case dec:
-        if(adsr->count < 0x1ffff - cfg->decay) {
-            adsr->count += cfg->decay;
-            adsr->output = 0xffff - (((uint32_t)(0xffff - cfg->sustain) * ENV_lut_exp[(uint8_t)(adsr->count >> 9)]) >> 16);
-        } else {
-            adsr->estado = sus;
-            adsr->count = 0;
-            adsr->output = cfg->sustain;
-        }
-        break;
-
-    case sus:
         if(frame == 1){
-            adsr->estado = rel;
+            adsr->count = 0;
+            adsr->estado = release;
             adsr->amp_to_release = adsr->output;
         }
         break;
 
-    case rel:
+    case decay:
+        if(adsr->count < 0x1ffff - cfg->decay) {
+            adsr->count += cfg->decay;
+            adsr->output = 0xffff - (((uint32_t)(0xffff - cfg->sustain) * ENV_lut_exp[(uint8_t)(adsr->count >> 9)]) >> 16);
+        } else {
+            adsr->estado = sustain;
+            adsr->count = 0;
+            adsr->output = cfg->sustain;
+        }
+        //break; para que cascadee a la condición de release
+
+    case sustain:
+        if(frame == 1){
+            adsr->count = 0;
+            adsr->estado = release;
+            adsr->amp_to_release = adsr->output;
+        }
+        break;
+
+    case release:
         if(adsr->count < 0x1ffff - cfg->release) {
             adsr->count += cfg->release;
             adsr->output = adsr->amp_to_release - (((uint32_t)(adsr->amp_to_release) * ENV_lut_exp[(uint8_t)(adsr->count >> 9)]) >> 16);
@@ -97,49 +100,108 @@ uint16_t ADSR_advance(ADSR_engine_t* adsr, ADSR_config_t* cfg, uint32_t frame) {
         break;
     }
 
-    // Depth & bias
-    uint32_t out = (((uint32_t)adsr->output * cfg->depth) >> 16) + cfg->bias;
-
-    if(out >= 0xffff)
-        return 0xffff;
-    else
-        return (uint16_t) out;
+    return adsr->output;
 
 }
 
 
 // Voces
 
-typedef enum{saw, tri, square, pulse} osc_shape_t;
-volatile osc_shape_t shape;     // sierra-triangular / cuadrada
-volatile uint8_t shaping;       // hipersaw - metalizer - PW - XOR
+#define MAX_OSCxVOICE 8
 
 typedef struct{
-    volatile uint32_t frame; // <-- acá guardo cuándo se encendió el oscilador! 
-    volatile int32_t phase_acc;
-    volatile uint32_t phase_inc;
-    volatile uint8_t current_note;
+    uint32_t frame;
+    uint8_t note;
+
+    uint32_t phase_acc[MAX_OSCxVOICE];
+    uint32_t phase_inc;
+
+    uint8_t velocity;
 
     ADSR_engine_t vca_env;
-    volatile uint16_t current_amp;
-
-    uint16_t metalic;
-
-    // --- Filtro Sallen-Key ---
-    ADSR_engine_t vcf_env;
-    volatile int32_t cutoff;    // rango seguro 100 a 16.000 ?
-    volatile int32_t s1; // Capacitor del polo 1
-    volatile int32_t s2; // Capacitor del polo 2
+    ADSR_engine_t morph_env;
 } voice_t;
 
+// Arreglo de voces
 
-#define MAX_VOICES 8
+#define MAX_VOICES 16
 voice_t voices[MAX_VOICES];
 
-volatile uint32_t current_frame = 0;
+uint32_t current_frame = 10;
 
 float midi_to_freq(uint8_t note) {
     return 440.0f * powf(2.0f, (note - 69) / 12.0f);
+}
+
+
+
+// WAVETABLEs
+
+typedef struct {
+    const int16_t* LUT;
+
+    uint8_t blend_double_freq;
+    uint8_t x_warp;
+} wave_cfg;
+
+wave_cfg wave0_cfg;
+wave_cfg wave1_cfg;
+uint8_t need2recalc = 0x01 | 0x02; // Necesito recalcular la wave0 (0x01) y/o la wave1 (0x02)
+
+#define WAVE_SIZE 1024
+int16_t wave0[WAVE_SIZE];
+int16_t wave1[WAVE_SIZE];
+
+// Parámetros globales
+
+int32_t osc_deviation[MAX_OSCxVOICE];
+uint8_t oscXvoice = 1;
+
+
+uint16_t env1_depth;
+uint16_t env1_bias;
+uint8_t vel_to_morph = 0;
+
+
+// Tablas de onda
+
+#define LUT_SIZE 256 // hay que darle 1 muestra más a las LUTs para interpolar la última!!
+extern int8_t display_wave[128];
+
+void waveform_fill(int16_t* wavetable, wave_cfg* cfg){
+
+    int16_t buff0[1024];
+    // int16_t buff1[1024];
+
+    // Calculo toda la wavetable a frecuencia fundamental
+    for(uint16_t i = 0; i < WAVE_SIZE; i++){
+        buff0[i] = cfg->LUT[i >> 2] + (((i & 0x03) * ((int32_t)cfg->LUT[(i >> 2) + 1] - cfg->LUT[i >> 2])) >> 2);
+    }
+
+    for(uint16_t i = 0; i < WAVE_SIZE; i++){
+        wavetable[i] = ((int32_t)buff0[i] * (0xff - cfg->blend_double_freq)  +  (int32_t)buff0[(2*i) & 1023] * cfg->blend_double_freq) >> 8;
+    }
+
+    // for(uint16_t i = 0; i < WAVE_SIZE; i++){
+    //     float x = (i / 511.5f) - 1.0f;
+    //     float exponent = 1.0f + (15.0f * (cfg->x_warp / 255.0f));
+    //     float sign = (x < 0.0f) ? -1.0f : 1.0f;
+        
+    //     uint16_t warped_i = (uint16_t)((sign*powf(fabsf(x), exponent) + 1.f) * 511.5f);
+    //     buff0[i] = buff1[warped_i];
+    // }
+
+
+    // for(uint16_t i = 0; i < WAVE_SIZE; i++){
+    //     wavetable[i] = buff1[i];    // El último buffer que se haya escrito!
+    // }
+
+
+    // Display wave
+    for(uint8_t i = 0; i < 128; i++){
+        display_wave[i] = wavetable[i << 3] >> 11;
+    }
+
 }
 
 
@@ -163,23 +225,42 @@ int32_t LFO_LUT(LFO_t* lfo){
     return (lut[k] << 5) + (int16_t)(((int32_t)(lut[k+1]-lut[k]) * t) >> 11);
 }
 
+// Gráficos en pantalla
+
+void plot_curve(int16_t*, int16_t*, uint8_t);
 
 
-void plot_curve(int8_t*);
-int8_t wave[128];
+
 
 // Funciones externas
-
+ 
 void SYNTH_init(){
     for(uint8_t i = 0; i < MAX_VOICES; i++){
-        voices[i].vcf_env.estado = off;
+        voices[i].morph_env.estado = off;
         voices[i].vca_env.estado = off;
-        voices[i].current_amp = 0;
-        voices[i].cutoff = 100;
-        voices[i].frame = 0;
+        voices[i].frame = 10;
     }
+
+    wave0_cfg.LUT = sine256;
+    wave1_cfg.LUT = sine256;
+    wave1_cfg.blend_double_freq = 255;
 }
 
+
+
+
+extern volatile uint8_t parameter_to_ctrl;
+#define _DO 0x01
+#define _DOs 0x02
+#define _RE 0x03
+#define _REs 0x04
+#define _MI 0x05
+#define _FA 0x06
+#define _FAs 0x07
+#define _SOL 0x08
+#define _SOLs 0x09
+#define _LA 0x0A
+#define _LAs 0x0B
 
 void SYNTH_MIDI_msg(uint8_t msg[4]){
     uint8_t command = msg[1] & 0xF0;
@@ -199,151 +280,204 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
                 v = &voices[i];
         }
 
-        v->current_note = note;
         v->frame = current_frame;
+        v->note = note;
 
         float freq = midi_to_freq(note);
         v->phase_inc = (uint32_t) (freq / SAMPLE_RATE * 0xffffffff);
+        v->velocity = vel;
 
-        v->vca_env.estado = att;
+        v->vca_env.estado = attack;
         v->vca_env.count = 0;
-        v->vcf_env.estado = att;
-        v->vcf_env.count = 0;
+        v->morph_env.estado = attack;
+        v->morph_env.count = 0;
 
-        v->metalic = (uint16_t)shaping << 8;
-
-    } else if (command == 0x80 || (command ==0x90 && vel == 0)) {
+    } else if (command == 0x80 || (command == 0x90 && vel == 0)) {
         // Note OFF
         for(uint8_t i = 0; i < MAX_VOICES; i++){
-            if(voices[i].current_note == note) {
+            if(voices[i].note == note) {
                 voices[i].frame = 1;
             }
         }
     }
 
     if(command == 0xB0){
-        if(note == 1){          // 1-Modulation 
-            shaping = vel * 2;
+        if(note == 1){          // 1-Modulation Wheel
+            uint16_t vel1 = vel << 9;
+            uint16_t vel2 = (vel*vel) << 2;
+            uint16_t vel3 = 128-vel;    // para los transitorios de los Envelope
 
-            for(uint8_t i = 0; i < 128; i++)
-                wave[i] = ((i/2 - 32) * shaping) >> 8;
+            switch (parameter_to_ctrl) {
+            case 0x10 | _DO:
+                if(vel < 32)      wave0_cfg.LUT = sine256;
+                else if(vel < 64) wave0_cfg.LUT = tri256;
+                else if(vel < 96) wave0_cfg.LUT = saw256;
+                else              wave0_cfg.LUT = sqr256;   need2recalc = 0x01;    break;
+            case 0x10 | _DOs:
+                wave0_cfg.x_warp = vel << 1;                need2recalc = 0x01;    break;
+            case 0x10 | _RE:
+                wave0_cfg.blend_double_freq = vel << 1;     need2recalc = 0x01;    break;
 
-            plot_curve(wave);
+                
+            case 0x30 | _DO:
+                if(vel < 32)      wave1_cfg.LUT = sine256;
+                else if(vel < 64) wave1_cfg.LUT = tri256;
+                else if(vel < 96) wave1_cfg.LUT = saw256;
+                else              wave1_cfg.LUT = sqr256;   need2recalc = 0x02;    break;
+            case 0x30 | _RE:
+                wave1_cfg.blend_double_freq = vel << 1;     need2recalc = 0x02;    break;
 
-        } //else if (note == 2){  // 2-Breath 
-        //     resonance = vel * 300;
-        // }
+
+            // ENV0 (VCA Envelope)
+            case 0x60 | _DO: // Attack
+                vca_envelope.attack = vel3;     break;
+            case 0x60 | _RE: // Decay
+                vca_envelope.decay = vel3;      break;
+            case 0x60 | _MI: // Sustain
+                vca_envelope.sustain = vel1;    break;  // este es lineal
+            case 0x60 | _FA: // Release
+                vca_envelope.release = vel3;    break;
+
+
+            // ENV1 (Morph Envelope)
+            case 0x80 | _DO: // Attack
+                morph_envelope.attack = vel3;   break;
+            case 0x80 | _RE: // Decay
+                morph_envelope.decay = vel3;    break;
+            case 0x80 | _MI: // Sustain
+                morph_envelope.sustain = vel1;  break;
+            case 0x80 | _FA: // Release
+                morph_envelope.release = vel3;  break;
+
+            case 0x80 | _DOs: // Bias
+                env1_bias = vel1;       break;
+            case 0x80 | _REs: // Depth
+                env1_depth = vel1;      break;
+
+            
+            default:
+                break;
+            }
+
+        }
 
 
     }
 }
 
+// Modificadores de envolventes
+// Do  - Attack
+//   Do#  - Depth (solo env1)
+// Re  - Decay
+//   Re#  - Bias (solo env1)
+// Mi  - Sustain
+// Fa  - Release
+//   Fa#  - LFO1 to morph depth (solo env1)
+// Sol - Velocity
+//   Sol# - LFO1 to morph speed (solo env1)
+// La  - 
+//   La#  - 
+
+// Modificadores de las tablas de onda:
+// 1. Blend de doble frecuencia 
+//      LUT[i] * (1-mix) + LUT[(i * 2) % 1024] * mix
+// 2. X Warp (Phase Distortion)
+//      i_nuevo = 1024 * (i/1024)^n
+// 3. Formantes por Ventana (Windowed Sync)
+//      Consiste en generar un seno de alta frecuencia (4 o 5 ciclos completos en 1024 puntos) que representa el formante, y 
+// multiplicarla por una "ventana" de amplitud con forma de campana (Hanning o Gauss) que empieza en 0, sube al medio y termina
+// en 0 en la posición 1023. Altera la frecuencia de esa senoidal interna y vas a mutar entre vocales ("A", "O", "U").
+// 4. Wavefolding
+// 5. Pulse Width (o pseudo Hard Sync)
+//      wavetable[i] = LUT[(i * sync_factor) % 1024] para i * sync_factor < 1024,
+//      wavetable[i] = 0  c.c.   ,  con 1 < sync_factor < 2
+// La onda se comprime y reproduce un ciclo y monedas dentro de los 1024 puntos, cayendo a cero abruptamente al final.
+// 6. Overdrive
+// 7. Bit-crusher
+//      wavetable[i] = (LUT[i] >> reduccion) << reduccion
+
+// Modificadores generales
+// 1. OSCxVOZ
+// 2. OSC spread
+// 3. Vibrato speed (LFO0)
+// 4. Vibrato depth (separado por voz?)
+// 5. Vibrato attack
+// 6. Portamento (polifónico?)
+
+// FX
+// 1. Drive
+// 2. Delay time
+// 3. Delay feedback
+// 4. LP
+// 5. HP
+// 6. Chorus  (depth + 7. speed)
+//      Basado en una línea de retardo corta modulada por LFO3
+// 8. Tremolo (depth + 9. speed)
+// 10. 
+// 11. 
 
 
-const int16_t wavefolder[] = {
-    0, 324, 649, 973, 1298, 1622, 1947, 2271, 
-    2595, 2920, 3244, 3569, 3893, 4218, 4542, 4866, 
-    5191, 5515, 5840, 6164, 6489, 6813, 7137, 7462, 
-    7786, 8111, 8435, 8760, 9084, 9408, 9733, 10057, 
-    10382, 10706, 11030, 11355, 11679, 12004, 12328, 12653, 
-    12977, 13301, 13626, 13950, 14275, 14599, 14924, 15248, 
-    15572, 15897, 16221, 16546, 16870, 17195, 17519, 17843, 
-    18168, 18492, 18817, 19141, 19466, 19790, 20114, 20439, 
-    20763, 21088, 21412, 21737, 22061, 22385, 22710, 23034, 
-    23359, 23683, 24008, 24332, 24656, 24981, 25305, 25630, 
-    25954, 26278, 26603, 26927, 27252, 27576, 27901, 28225, 
-    28549, 28874, 29198, 29523, 29847, 30172, 30496, 30820, 
-    31145, 31469, 31794, 32118, 32443, 32767, 32439, 32112, 
-    31784, 31456, 31129, 30801, 30473, 30146, 29818, 29490, 
-    29163, 28835, 28507, 28180, 27852, 27524, 27197, 26869, 
-    26541, 26214, 25886, 25558, 25231, 24903, 24576, 24248, 
-    23920, 23593, 23265, 22937, 22610, 22282, 21954, 21627, 
-    21299, 20971, 20644, 20316, 19988, 19661, 19333, 19005, 
-    18678, 18350, 18022, 17695, 17367, 17039, 16712, 16384, 
-    16712, 17039, 17367, 17695, 18022, 18350, 18678, 19005, 
-    19333, 19661, 19988, 20316, 20644, 20971, 21299, 21627, 
-    21954, 22282, 22610, 22937, 23265, 23593, 23920, 24248, 
-    24576, 24903, 25231, 25558, 25886, 26214, 26541, 26869, 
-    27197, 27524, 27852, 28180, 28507, 28835, 29163, 29490, 
-    29818, 30146, 30473, 30801, 31129, 31456, 31784, 32112, 
-    32439, 32767, 32439, 32112, 31784, 31456, 31129, 30801, 
-    30473, 30146, 29818, 29490, 29163, 28835, 28507, 28180, 
-    27852, 27524, 27197, 26869, 26541, 26214, 25886, 25558, 
-    25231, 24903, 24576, 24248, 23920, 23593, 23265, 22937, 
-    22610, 22282, 21954, 21627, 21299, 20971, 20644, 20316, 
-    19988, 19661, 19333, 19005, 18678, 18350, 18022, 17695, 
-    17367, 17039, 16712, 16384, 16056, 15729, 15401, 15073
-};
+#ifndef SAMPLES
+    #define SAMPLES 256
+#endif
 
-
-int16_t SYNTH_get_audio_sample(){
-    int16_t buff = 0;
-
+void SYNTH_fill_audio_buffers(int16_t* buffer){
     current_frame++;
-    
-    // LFO
-    lfo_detune.phase_acc += lfo_detune.phase_inc;
-    lfo_detune.value = LFO_LUT(&lfo_detune);
 
-    // Voces
-    for(uint8_t i = 0; i < MAX_VOICES; i++){
-        voice_t* v = &voices[i];
+    if(need2recalc != 0){
+        if(need2recalc & 0x01) waveform_fill(wave0, &wave0_cfg);
+        if(need2recalc & 0x02) waveform_fill(wave1, &wave1_cfg);
+
+        need2recalc = 0;
+        return;
+    }
+
+    // Crear y limpiar buffer local
+    int32_t buff[SAMPLES];
+    for(uint16_t i = 0; i < SAMPLES; i++)
+        buff[i] = 0;
+
+    // Para cada voz, calcular las 256 muestras
+    for(uint8_t k = 0; k < MAX_VOICES; k++){
+        voice_t* v = &voices[k];
         if(v->frame == 0) continue; // voz apagada
 
+        uint16_t amp,       morph;
+        uint32_t morph_raw;
+        int32_t  wave0_sum, wave1_sum;
+        int32_t  voice_out;
 
-        // Forma de onda
-        v->phase_acc += v->phase_inc;// + lfo_detune.value;
-            
-        int32_t p = v->phase_acc;
-        int16_t raw_saw = (int16_t)(p >> 17); // 16 + 1
+        for(uint16_t i = 0; i < SAMPLES; i++){
+            amp =   ADSR_advance(&v->vca_env,   &vca_envelope,   v->frame);
+            if(v->vca_env.estado == off){ v->frame = 0; break; }
+            morph_raw = ADSR_advance(&v->morph_env, &morph_envelope, v->frame)*env1_depth;
+            morph_raw = (morph_raw >> 16) + env1_bias;
+            morph = (uint16_t)__USAT(morph_raw, 16);
 
+            wave0_sum = 0;
+            wave1_sum = 0;
+            for(uint8_t j = 0; j < oscXvoice; j++){
+                v->phase_acc[j] += v->phase_inc + osc_deviation[j];
 
-        int16_t raw_tri = (int16_t)(((p ^ (p >> 31)) >> 15) - 32768);
+                wave0_sum += wave0[v->phase_acc[j] >> 22]; // OJO CON EL WAVE_SIZE
+                wave1_sum += wave1[v->phase_acc[j] >> 22];
+            }
 
-        uint16_t gain = 256 + ((v->metalic >> 8) * 6);
-        if(v->metalic > 0)
-            v->metalic--;
-        
-        // triángulo amplificado (excedido del rango de int16_t)
-        int32_t driven_tri = (raw_tri * gain) >> 8; 
-        
-        int32_t sign = driven_tri >> 31;
-        // valor absoluto branchless
-        int32_t abs_driven = (driven_tri ^ sign) - sign;
+            voice_out = ((wave1_sum * morph) >> 16) + ((wave0_sum * (0xffff-morph)) >> 16);
+            voice_out = (voice_out * amp) >> 16;
 
-        int16_t raw_wave = (wavefolder[(uint8_t)(abs_driven >> 9)] ^ sign) - sign; 
+            buff[i] += voice_out;
+        }
 
-
-        // VCF
-        
-        // VCF Envelope (Filter)
-        uint16_t vcf_adsr = ADSR_advance(&v->vcf_env, &vcf_envelope, v->frame);
-        v->cutoff = 100 + ((uint32_t)vcf_adsr * 8000) / 65535; // Cutoff máximo ~ 8100
-
-        // Feedback global (Resonancia) extraído del último capacitor (s2)
-        int32_t feedback = (voices[i].s2 * resonance) >> 15; // Q15
-        // Mezcla de entrada y saturación en el Op-Amp virtual
-        int32_t mixed_in = soft_clip(raw_wave - feedback);
-
-        // Polo 1: s1[n] = s1[n-1] + f * (input - s1[n-1])
-        voices[i].s1 += (v->cutoff * (mixed_in - voices[i].s1)) >> 15;
-        // Polo 2: s2[n] = s2[n-1] + f * (s1[n] - s2[n-1])
-        voices[i].s2 += (v->cutoff * (voices[i].s1 - voices[i].s2)) >> 15;
-
-
-        // VCA
-        // VCA Envelope
-        v->current_amp = ADSR_advance(&v->vca_env, &vca_envelope, v->frame);
-
-        int32_t vca_out = ((int32_t)v->s2 * voices[i].current_amp) >> 15; // 16
-
-        if (v->vca_env.estado == off) // condición de apagado
-            v->frame = 0;
-
-
-
-        buff += vca_out >> 3; // headroom
+        //if(k == 0) plot_curve(wave0, wave1, (uint8_t)(morph >> 8));
     }
 
-    return buff;
+    // Llenar buffers de audio
+    int16_t sample;
+    for(uint16_t i = 0; i < SAMPLES; i++){
+        sample = (int16_t)(buff[i] >> 3);
+        buffer[2*i    ] = sample;   // Canal L
+        buffer[2*i + 1] = sample;   // Canal R
+    }
 }
+

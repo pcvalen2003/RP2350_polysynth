@@ -62,6 +62,9 @@ target_link_libraries(PicoFX
         hardware_clocks
         hardware_i2c       # i2c_init y I2C0
         hardware_gpio      # Para configurar el Pin Mux (GP4/GP5)
+        hardware_uart
+        #pico_platform      # CMSIS
+        cmsis_core
         pico_multicore
     )
 

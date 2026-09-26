@@ -1,4 +1,3 @@
-
 //Aproximación de tanh (rango de entrada esperado +/- 32768)
 static inline int32_t soft_clip(int32_t x) {
     const int32_t limit = 32767;

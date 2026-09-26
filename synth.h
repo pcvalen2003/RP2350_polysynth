@@ -9,6 +9,6 @@ void SYNTH_init();
 
 void SYNTH_MIDI_msg(uint8_t msg[4]);
 
-int16_t SYNTH_get_audio_sample();
+void SYNTH_fill_audio_buffers(int16_t*);
 
 #endif
