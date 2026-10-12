@@ -251,7 +251,8 @@ int32_t LFO_LUT(LFO_t* lfo){
 }
 
 
-// FX: Delay + Chorus
+    // FX: Delay + Chorus
+
 #define DELAY_MASK 0xFFFF // Máscara para 65536 posiciones
 static int16_t delay_line[DELAY_MASK + 1]; // 131 KB en RAM (Sección BSS)
 static uint16_t delay_write_ptr = 0;
@@ -261,6 +262,8 @@ volatile uint16_t delay_time_samples = 0; // 0 a 65535
 volatile uint16_t delay_feedback = 0;     // 0 a ~30000 (Formato Q15)
 volatile uint8_t  delay_mix = 0;          // 0 a 255 (Wet/Dry)
 
+LFO_t lfo_chorus = {0, 0, LFO_lut_sine, 0}; // Usamos tu estructura de LFO
+volatile uint16_t chorus_depth = 0;         // 0 a 127
 
 
 
@@ -427,6 +430,11 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
                 delay_feedback = vel * 245;     break;
             case 0xA0 | _RE:
                 delay_mix = vel << 1;           break;
+            case 0xA0 | _REs:
+                lfo_chorus.phase_inc = // Escala el LFO de ~0.2 Hz a ~5.0 Hz
+                    19000 + (vel * 3680);       break;
+            case 0xA0 | _MI:
+                chorus_depth = vel;             break;
 
             
             default:
@@ -573,11 +581,22 @@ void SYNTH_fill_audio_buffers(int16_t* buffer){
     }
 
     // Llenar buffers de audio
-    int16_t sample;
     for(uint16_t i = 0; i < SAMPLES; i++){
-        sample = (int16_t)(buff[i] >> 3);
-        buffer[2*i    ] = sample;   // Canal L
-        buffer[2*i + 1] = sample;   // Canal R
+        int16_t dry_sample = (int16_t)__SSAT(buff[i] >> 3, 16); // Saturación a int16
+
+        uint16_t delay_read_ptr = (delay_write_ptr - delay_time_samples) & DELAY_MASK;
+        int16_t wet_sample = delay_line[delay_read_ptr];
+
+        int32_t feedback_in = dry_sample + ((wet_sample * delay_feedback) >> 15);
+        delay_line[delay_write_ptr] = (int16_t)__SSAT(feedback_in, 16);
+
+        int32_t out_sample = ((dry_sample * (255 - delay_mix)) + (wet_sample * delay_mix)) >> 8;
+        int16_t final_out = (int16_t)__SSAT(out_sample, 16);
+
+        buffer[2*i    ] = final_out;   // Canal L
+        buffer[2*i + 1] = final_out;   // Canal R
+
+        delay_write_ptr = (delay_write_ptr + 1) & DELAY_MASK;
     }
 }
 

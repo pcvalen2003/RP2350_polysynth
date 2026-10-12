@@ -158,7 +158,7 @@ enum {
 
 volatile uint8_t parameter_to_ctrl;
 
-const char* titulos_menu[] = {"Main menu", "Wave 0", "Empty1", "Wave 1", "Empty2", "General voices", "Envelope 0", "Empty4", "Envelope 1"};
+const char* titulos_menu[] = {"Main menu", "Wave 0", "Empty1", "Wave 1", "Empty2", "General voices", "Envelope 0", "Empty4", "Envelope 1", "Empty5", "FX"};
 const char* titulos_cfg[] = {
     "Wave0 waveform", "Wave0 X-warp", "Wave0 double freq", "Wave0 par3", "Wave0 par4", "Wave0 par5", 
     "Wave0 par6", "Wave0 bit-crusher", "Wave0 par8", "Wave0 par9", "Wave0 par10", "", "", "", "", "",
@@ -187,7 +187,7 @@ const char* titulos_cfg[] = {
     "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
     "", "", "", "", "",
 
-    "Delay time", "Delay feedback", "Delay mix", "fx", "fx", "fx", "fx", "fx", "fx", "fx", "fx",
+    "Delay time", "Delay feedback", "Delay mix", "Chorus rate", "Chorus depth", "fx", "fx", "fx", "fx", "fx", "fx",
     "", "", "", "", "",
 };
 
