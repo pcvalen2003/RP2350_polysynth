@@ -153,15 +153,15 @@ void plot_waveform(){
 }
 
 enum {
-    main_menu, wave0_menu, empty1,  wave1_menu, empty2, empty3, env0_menu, empty4, env1_menu
+    main_menu, wave0_menu, empty1,  wave1_menu, empty2, general_menu, env0_menu, empty4, env1_menu, empty5, fx_menu,
 } menu;
 
 volatile uint8_t parameter_to_ctrl;
 
-const char* titulos_menu[] = {"Main menu", "Wave 0", "Empty1", "Wave 1", "Empty2", "Empty3", "Envelope 0", "Empty4", "Envelope 1"};
+const char* titulos_menu[] = {"Main menu", "Wave 0", "Empty1", "Wave 1", "Empty2", "General voices", "Envelope 0", "Empty4", "Envelope 1"};
 const char* titulos_cfg[] = {
     "Wave0 waveform", "Wave0 X-warp", "Wave0 double freq", "Wave0 par3", "Wave0 par4", "Wave0 par5", 
-    "Wave0 par6", "Wave0 par7", "Wave0 par8", "Wave0 par9", "Wave0 par10", "", "", "", "", "",
+    "Wave0 par6", "Wave0 bit-crusher", "Wave0 par8", "Wave0 par9", "Wave0 par10", "", "", "", "", "",
 
     "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
     "", "", "", "", "",
@@ -172,7 +172,7 @@ const char* titulos_cfg[] = {
     "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
     "", "", "", "", "",
 
-    "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
+    "OSC x Voice", "OSC spread", "Drive", "none", "none", "none", "none", "none", "none", "none", "none",
     "", "", "", "", "",
 
     "Env0 attack", "env0", "Env0 decay", "env0", "Env0 sustain", "Env0 release", "env0",
@@ -181,8 +181,14 @@ const char* titulos_cfg[] = {
     "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
     "", "", "", "", "",
     
-    "Env1 attack", "env1", "Env1 decay", "env1", "Env1 sustain", "Env1 release", "env1",
-    "Env1 Depth", "env1", "Env1 Bias", "env1", "", "", "", "", "",
+    "Env1 attack", "Env1 Bias", "Env1 decay", "Env1 Depth", "Env1 sustain", "Env1 release", "env1",
+    "env1", "env1", "env1", "env1", "", "", "", "", "",
+
+    "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none",
+    "", "", "", "", "",
+
+    "Delay time", "Delay feedback", "Delay mix", "fx", "fx", "fx", "fx", "fx", "fx", "fx", "fx",
+    "", "", "", "", "",
 };
 
 void core1_main() {
@@ -198,13 +204,17 @@ void core1_main() {
             case main_menu:
                 switch (ctrl) {
                 case 1: // Do
-                    menu = wave0_menu;  break;
+                    menu = wave0_menu;      break;
                 case 3: // Re
-                    menu = wave1_menu;  break;
+                    menu = wave1_menu;      break;
+                case 5: // Mi
+                    menu = general_menu;    break;
                 case 6: // Fa
-                    menu = env0_menu;   break;
+                    menu = env0_menu;       break;
                 case 8: // Sol
-                    menu = env1_menu;   break;
+                    menu = env1_menu;       break;
+                case 10: // La
+                    menu = fx_menu;         break;
                 
                 default:    break;
                 }   

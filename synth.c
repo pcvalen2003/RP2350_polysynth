@@ -3,6 +3,7 @@
 #include "pico/stdlib.h"
 #include "cmsis_compiler.h"
 #include <math.h>
+// #include "hardware/rand.h"
 
 #include <LUT/LFO.h>
 #include <LUT/ENV.h>
@@ -142,6 +143,7 @@ typedef struct {
 
     uint8_t blend_double_freq;
     uint8_t x_warp;
+    uint8_t bitcrush;
 } wave_cfg;
 
 wave_cfg wave0_cfg;
@@ -154,8 +156,21 @@ int16_t wave1[WAVE_SIZE];
 
 // Parámetros globales
 
-int32_t osc_deviation[MAX_OSCxVOICE];
+// Desviación Gaussiana
+// Concentra las voces en la fundamental y expande las colas al aumentar N
+int32_t osc_deviation[MAX_OSCxVOICE][MAX_OSCxVOICE] = 
+{   {0},                                                 // 1 voz   (Max Z: 0)
+    {440, -440},                                         // 2 voces (Max Z: 0.67)
+    {0, 630, -630},                                      // 3 voces (Max Z: 0.97)
+    {208, -208, 750, -750},                              // 4 voces (Max Z: 1.15)
+    {0, 342, -342, 835, -835},                           // 5 voces (Max Z: 1.28)
+    {137, -137, 440, -440, 901, -901},                   // 6 voces (Max Z: 1.38)
+    {0, 239, -239, 516, -516, 956, -956},                // 7 voces (Max Z: 1.47)
+    {102, -102, 319, -319, 579, -579, 1000, -1000}       // 8 voces (Max Z: 1.53)
+};
 uint8_t oscXvoice = 1;
+uint8_t voices_spread = 0;
+uint8_t voices_drive = 16;
 
 
 uint16_t env1_depth;
@@ -170,8 +185,8 @@ extern int8_t display_wave[128];
 
 void waveform_fill(int16_t* wavetable, wave_cfg* cfg){
 
-    int16_t buff0[1024];
-    // int16_t buff1[1024];
+    static int16_t buff0[1024];
+    static int16_t buff1[1024];
 
     // Calculo toda la wavetable a frecuencia fundamental
     for(uint16_t i = 0; i < WAVE_SIZE; i++){
@@ -179,22 +194,32 @@ void waveform_fill(int16_t* wavetable, wave_cfg* cfg){
     }
 
     for(uint16_t i = 0; i < WAVE_SIZE; i++){
-        wavetable[i] = ((int32_t)buff0[i] * (0xff - cfg->blend_double_freq)  +  (int32_t)buff0[(2*i) & 1023] * cfg->blend_double_freq) >> 8;
+        buff0[i] = cfg->LUT[i >> 2] + (((i & 0x03) * ((int32_t)cfg->LUT[(i >> 2) + 1] - cfg->LUT[i >> 2])) >> 2);
     }
 
-    // for(uint16_t i = 0; i < WAVE_SIZE; i++){
-    //     float x = (i / 511.5f) - 1.0f;
-    //     float exponent = 1.0f + (15.0f * (cfg->x_warp / 255.0f));
-    //     float sign = (x < 0.0f) ? -1.0f : 1.0f;
+    // Blend de doble frecuencia (buff0 -> buff1)
+    for(uint16_t i = 0; i < WAVE_SIZE; i++){
+        buff1[i] = ((int32_t)buff0[i] * (0xff - cfg->blend_double_freq)  +  (int32_t)buff0[(2*i) & 1023] * cfg->blend_double_freq) >> 8;
+    }
+
+    // X-Warp (buff1 -> buff0)
+    for(uint16_t i = 0; i < WAVE_SIZE; i++){
+        float x = (i / 511.5f) - 1.0f;
+        float exponent = 1.0f + (15.0f * (cfg->x_warp / 255.0f));
+        float sign = (x < 0.0f) ? -1.0f : 1.0f;
         
-    //     uint16_t warped_i = (uint16_t)((sign*powf(fabsf(x), exponent) + 1.f) * 511.5f);
-    //     buff0[i] = buff1[warped_i];
-    // }
-
-
-    // for(uint16_t i = 0; i < WAVE_SIZE; i++){
-    //     wavetable[i] = buff1[i];    // El último buffer que se haya escrito!
-    // }
+        uint16_t warped_i = (uint16_t)((sign*powf(fabsf(x), exponent) + 1.f) * 511.5f);
+        
+        // Blindaje contra errores de redondeo de punto flotante
+        if(warped_i > 1023) warped_i = 1023;
+        
+        buff0[i] = buff1[warped_i];
+    }
+    
+    // Bit-crusher (buff0 -> wavetable)
+    for(uint16_t i = 0; i < WAVE_SIZE; i++){
+        wavetable[i] = (buff0[i] >> cfg->bitcrush) << cfg->bitcrush;
+    }
 
 
     // Display wave
@@ -225,6 +250,28 @@ int32_t LFO_LUT(LFO_t* lfo){
     return (lut[k] << 5) + (int16_t)(((int32_t)(lut[k+1]-lut[k]) * t) >> 11);
 }
 
+
+// FX: Delay + Chorus
+#define DELAY_MASK 0xFFFF // Máscara para 65536 posiciones
+static int16_t delay_line[DELAY_MASK + 1]; // 131 KB en RAM (Sección BSS)
+static uint16_t delay_write_ptr = 0;
+
+// Parámetros de control
+volatile uint16_t delay_time_samples = 0; // 0 a 65535
+volatile uint16_t delay_feedback = 0;     // 0 a ~30000 (Formato Q15)
+volatile uint8_t  delay_mix = 0;          // 0 a 255 (Wet/Dry)
+
+
+
+
+
+
+
+
+
+
+
+
 // Gráficos en pantalla
 
 void plot_curve(int16_t*, int16_t*, uint8_t);
@@ -244,6 +291,8 @@ void SYNTH_init(){
     wave0_cfg.LUT = sine256;
     wave1_cfg.LUT = sine256;
     wave1_cfg.blend_double_freq = 255;
+    wave0_cfg.bitcrush = 0;
+    wave1_cfg.bitcrush = 0;
 }
 
 
@@ -287,6 +336,9 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
         v->phase_inc = (uint32_t) (freq / SAMPLE_RATE * 0xffffffff);
         v->velocity = vel;
 
+        // for(uint8_t i = 0; i < MAX_OSCxVOICE; i++)
+        //     v->phase_acc[i] = get_rand_32();
+
         v->vca_env.estado = attack;
         v->vca_env.count = 0;
         v->morph_env.estado = attack;
@@ -317,6 +369,8 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
                 wave0_cfg.x_warp = vel << 1;                need2recalc = 0x01;    break;
             case 0x10 | _RE:
                 wave0_cfg.blend_double_freq = vel << 1;     need2recalc = 0x01;    break;
+            case 0x10 | _SOL:
+                wave0_cfg.bitcrush = (vel >> 3);            need2recalc = 0x01;    break; 
 
                 
             case 0x30 | _DO:
@@ -324,8 +378,19 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
                 else if(vel < 64) wave1_cfg.LUT = tri256;
                 else if(vel < 96) wave1_cfg.LUT = saw256;
                 else              wave1_cfg.LUT = sqr256;   need2recalc = 0x02;    break;
+            case 0x30 | _DOs:
+                wave1_cfg.x_warp = vel << 1;                need2recalc = 0x02;    break;
             case 0x30 | _RE:
                 wave1_cfg.blend_double_freq = vel << 1;     need2recalc = 0x02;    break;
+
+
+            // General Voices
+            case 0x50 | _DO:
+                oscXvoice = (vel >> 4) + 1;     break;
+            case 0x50 | _DOs:
+                voices_spread = vel;            break;
+            case 0x50 | _RE:
+                voices_drive = vel+16;          break;
 
 
             // ENV0 (VCA Envelope)
@@ -353,6 +418,15 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
                 env1_bias = vel1;       break;
             case 0x80 | _REs: // Depth
                 env1_depth = vel1;      break;
+
+
+            // FX
+            case 0xA0 | _DO:
+                delay_time_samples = vel * 516; break;
+            case 0xA0 | _DOs:
+                delay_feedback = vel * 245;     break;
+            case 0xA0 | _RE:
+                delay_mix = vel << 1;           break;
 
             
             default:
@@ -392,7 +466,7 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
 //      wavetable[i] = LUT[(i * sync_factor) % 1024] para i * sync_factor < 1024,
 //      wavetable[i] = 0  c.c.   ,  con 1 < sync_factor < 2
 // La onda se comprime y reproduce un ciclo y monedas dentro de los 1024 puntos, cayendo a cero abruptamente al final.
-// 6. Overdrive
+// 6. Overdrive???
 // 7. Bit-crusher
 //      wavetable[i] = (LUT[i] >> reduccion) << reduccion
 
@@ -421,6 +495,19 @@ void SYNTH_MIDI_msg(uint8_t msg[4]){
     #define SAMPLES 256
 #endif
 
+// Compensación de compromiso ( 1 / N^0.75 )
+// Equilibrio entre conservación de volumen (RMS) y prevención de recortes (Headroom)
+const uint32_t poly_compensate[] = {
+    0x00010000, // 1 voz   (1.000)
+    0x00009837, // 2 voces (0.594)
+    0x0000704D, // 3 voces (0.438)
+    0x00005A82, // 4 voces (0.353)
+    0x00004C90, // 5 voces (0.299)
+    0x000042C6, // 6 voces (0.260)
+    0x00003B4D, // 7 voces (0.231)
+    0x0000355A  // 8 voces (0.208)
+};
+
 void SYNTH_fill_audio_buffers(int16_t* buffer){
     current_frame++;
 
@@ -429,7 +516,7 @@ void SYNTH_fill_audio_buffers(int16_t* buffer){
         if(need2recalc & 0x02) waveform_fill(wave1, &wave1_cfg);
 
         need2recalc = 0;
-        return;
+        //return;
     }
 
     // Crear y limpiar buffer local
@@ -446,6 +533,12 @@ void SYNTH_fill_audio_buffers(int16_t* buffer){
         uint32_t morph_raw;
         int32_t  wave0_sum, wave1_sum;
         int32_t  voice_out;
+        
+        // Desviación local de osciladores
+        int32_t  osc_dev_local[oscXvoice];
+        for(uint8_t i = 0; i < oscXvoice; i++)
+            osc_dev_local[i] = ((((v->phase_inc >> 8) * osc_deviation[oscXvoice-1][i]) >> 12) * (voices_spread + 16)) >> 8;
+
 
         for(uint16_t i = 0; i < SAMPLES; i++){
             amp =   ADSR_advance(&v->vca_env,   &vca_envelope,   v->frame);
@@ -457,19 +550,26 @@ void SYNTH_fill_audio_buffers(int16_t* buffer){
             wave0_sum = 0;
             wave1_sum = 0;
             for(uint8_t j = 0; j < oscXvoice; j++){
-                v->phase_acc[j] += v->phase_inc + osc_deviation[j];
+                v->phase_acc[j] += v->phase_inc + osc_dev_local[j];
 
                 wave0_sum += wave0[v->phase_acc[j] >> 22]; // OJO CON EL WAVE_SIZE
                 wave1_sum += wave1[v->phase_acc[j] >> 22];
             }
 
-            voice_out = ((wave1_sum * morph) >> 16) + ((wave0_sum * (0xffff-morph)) >> 16);
+            wave0_sum = (int32_t)(((int64_t)wave0_sum * poly_compensate[oscXvoice-1]) >> 16);
+            wave1_sum = (int32_t)(((int64_t)wave1_sum * poly_compensate[oscXvoice-1]) >> 16);
+
+            // Morph
+            voice_out = (((int64_t)wave1_sum * morph) >> 17) + (((int64_t)wave0_sum * (0xffff-morph)) >> 17);
+            // VCA
             voice_out = (voice_out * amp) >> 16;
+
+            // Voice Drive
+            voice_out = soft_clip((voice_out * voices_drive) >> 4); 
 
             buff[i] += voice_out;
         }
 
-        //if(k == 0) plot_curve(wave0, wave1, (uint8_t)(morph >> 8));
     }
 
     // Llenar buffers de audio
